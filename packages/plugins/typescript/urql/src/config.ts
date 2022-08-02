@@ -16,6 +16,12 @@ export interface UrqlRawPluginConfig extends RawClientSideBasePluginConfig {
    */
   withHooks?: boolean;
   /**
+   * @description Customized the output by enabling/disabling the generated React Router loaders. You can pass a path to the client.
+   * @default false
+   *
+   */
+  withLoaders?: boolean | string;
+  /**
    * @description You can specify module that exports components `Query`, `Mutation`, `Subscription` and HOCs
    * This is useful for further abstraction of some common tasks (e.g. error handling).
    * Filepath relative to generated file can be also specified.

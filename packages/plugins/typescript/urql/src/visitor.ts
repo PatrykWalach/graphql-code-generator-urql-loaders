@@ -13,6 +13,7 @@ import { OperationDefinitionNode, Kind, GraphQLSchema } from 'graphql';
 export interface UrqlPluginConfig extends ClientSideBasePluginConfig {
   withComponent: boolean;
   withHooks: boolean;
+  withLoaders: boolean | string;
   urqlImportFrom: string;
 }
 
@@ -22,6 +23,7 @@ export class UrqlVisitor extends ClientSideBaseVisitor<UrqlRawPluginConfig, Urql
   constructor(schema: GraphQLSchema, fragments: LoadedFragment[], rawConfig: UrqlRawPluginConfig) {
     super(schema, fragments, rawConfig, {
       withComponent: getConfigValue(rawConfig.withComponent, false),
+      withLoaders: getConfigValue(rawConfig.withLoaders, false),
       withHooks: getConfigValue(rawConfig.withHooks, true),
       urqlImportFrom: getConfigValue(rawConfig.urqlImportFrom, null),
     });
@@ -57,8 +59,15 @@ export class UrqlVisitor extends ClientSideBaseVisitor<UrqlRawPluginConfig, Urql
     if (this.config.withComponent) {
       imports.push(`import * as React from 'react';`);
     }
+    if (typeof this.config.withLoaders === 'string') {
+      const [source, import_ = 'default'] = this.config.withLoaders.split('#');
+      imports.push(`import { ${import_ ?? 'default'} as client } from '${source}' `);
+    }
+    if (this.config.withLoaders) {
+      imports.push(`import * as ReactRouter from 'react-router';`);
+    }
 
-    if (this.config.withComponent || this.config.withHooks) {
+    if (this.config.withComponent || this.config.withHooks || this.config.withLoaders) {
       imports.push(`import * as Urql from '${this.config.urqlImportFrom || 'urql'}';`);
     }
 
@@ -135,6 +144,55 @@ export function use${operationName}(options${
 };`;
   }
 
+  private _buildLoaders(
+    node: OperationDefinitionNode,
+    operationType: string,
+    documentVariableName: string,
+    operationResultType: string,
+    operationVariablesTypes: string
+  ): string {
+    const operationName: string = this.convertName(node.name?.value ?? '', {
+      suffix: this.getOperationSuffix(node, operationType),
+      useTypesPrefix: false,
+    });
+    const promiseLike = t => `${t} | PromiseLike<${t}>`;
+    const factory = t => `${t} | ((args: ReactRouter.ActionFunctionArgs) => ${promiseLike(t)})`;
+    const options = `${factory(`(Partial<Urql.OperationContext> & { variables?: ${operationVariablesTypes} })`)}`;
+
+    if (operationType === 'Mutation') {
+      return `
+export function use${operationName}ActionData(){
+  return ReactRouter.useActionData() as undefined | null | Awaited<ReturnType<ReturnType<typeof ${operationName}Action>>>
+}
+
+export function ${operationName}Action(options?: ${options}) {
+  return async function action(args: ReactRouter.ActionFunctionArgs){
+    const ctx = await (typeof options === 'function' ? options(args) : options)
+    const variables = 'variables' in ctx ? ctx.variables : await parseAction(args)
+    return client.mutation<${operationResultType}, ${operationVariablesTypes}>(${documentVariableName}, variables, ctx).toPromise();
+  }
+};`;
+    }
+    if (operationType === 'Subscription') {
+      return ``;
+    }
+    const isVariablesRequired = node.variableDefinitions.some(
+      variableDef => variableDef.type.kind === Kind.NON_NULL_TYPE && variableDef.defaultValue == null
+    );
+
+    return `
+export function use${operationName}LoaderData(){
+  return ReactRouter.useLoaderData() as Awaited<ReturnType<ReturnType<typeof ${operationName}Loader>>>
+}
+export function ${operationName}Loader(options?: ${options}) {
+  return async function loader(args: ReactRouter.LoaderFunctionArgs){
+    const ctx = await (typeof options === 'function' ? options(args) : options)
+    const variables = 'variables' in ctx ? ctx.variables : await parseLoader(args)
+    return client.query<${operationResultType}, ${operationVariablesTypes}>(${documentVariableName}, variables, { ...ctx, fetchOptions: { signal: args.request.signal, ...ctx.fetchOptions } }).toPromise();
+    }
+  };`;
+  }
+
   protected buildOperation(
     node: OperationDefinitionNode,
     documentVariableName: string,
@@ -165,6 +223,16 @@ export function use${operationName}(options${
         )
       : null;
 
-    return [component, hooks].filter(a => a).join('\n');
+    const loaders = this.config.withLoaders
+      ? this._buildLoaders(
+          node,
+          operationType,
+          documentVariablePrefixed,
+          operationResultTypePrefixed,
+          operationVariablesTypesPrefixed
+        )
+      : null;
+
+    return [component, hooks, loaders].filter(a => a).join('\n');
   }
 }
